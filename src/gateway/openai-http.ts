@@ -320,7 +320,11 @@ export async function handleOpenAiHttpRequest(
 
     if (evt.stream === "lifecycle") {
       const phase = evt.data?.phase;
-      if (phase === "end" || phase === "error") {
+      // Only close on "end", not on "error". Lifecycle "error" events can be
+      // emitted during fallback attempts (e.g., first model rate-limited).
+      // The stream should stay open until agentCommand fully completes
+      // (including all fallback attempts) or throws a final error.
+      if (phase === "end") {
         closed = true;
         unsubscribe();
         writeDone(res);

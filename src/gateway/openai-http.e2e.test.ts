@@ -428,4 +428,44 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
       // shared server
     }
   });
+
+  it("streaming waits for fallback to complete before closing on error", async () => {
+    // Regression test: lifecycle "error" events should not prematurely close
+    // the SSE stream. The stream should remain open until agentCommand fully
+    // resolves (including fallback attempts) or the final error is thrown.
+    const port = enabledPort;
+
+    agentCommand.mockReset();
+    agentCommand.mockImplementationOnce(async (opts: unknown) => {
+      const runId = (opts as { runId?: string } | undefined)?.runId ?? "";
+      // Simulate first model failing with a lifecycle error (e.g., rate limit)
+      emitAgentEvent({ runId, stream: "lifecycle", data: { phase: "error" } });
+      // Then the fallback succeeds and emits content
+      await new Promise((r) => setTimeout(r, 50));
+      emitAgentEvent({ runId, stream: "assistant", data: { delta: "fallback worked" } });
+      return { payloads: [{ text: "fallback worked" }] } as never;
+    });
+
+    const res = await postChatCompletions(port, {
+      stream: true,
+      model: "openclaw",
+      messages: [{ role: "user", content: "test fallback" }],
+    });
+    expect(res.status).toBe(200);
+
+    const text = await res.text();
+    const data = parseSseDataLines(text);
+    expect(data[data.length - 1]).toBe("[DONE]");
+
+    // The key assertion: we should see the fallback content, not just an error
+    const jsonChunks = data
+      .filter((d) => d !== "[DONE]")
+      .map((d) => JSON.parse(d) as Record<string, unknown>);
+    const allContent = jsonChunks
+      .flatMap((c) => (c.choices as Array<Record<string, unknown>> | undefined) ?? [])
+      .map((choice) => (choice.delta as Record<string, unknown> | undefined)?.content)
+      .filter((v): v is string => typeof v === "string")
+      .join("");
+    expect(allContent).toContain("fallback worked");
+  });
 });
